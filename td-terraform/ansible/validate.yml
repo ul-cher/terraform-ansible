@@ -1,0 +1,94 @@
+---
+- name: Validation et hygiène du container Docker
+  hosts: local
+  gather_facts: yes
+  
+  vars:
+    app_url: "http://localhost:{{ external_port }}"
+    http_timeout: 10
+  
+  tasks:
+    # PARTIE 1: VALIDATION HTTP
+    
+    - name: "[VALIDATION] Vérifier que le service HTTP répond"
+      uri:
+        url: "{{ app_url }}"
+        method: GET
+        status_code: 200
+        timeout: "{{ http_timeout }}"
+        return_content: no
+      register: http_check
+      retries: 3
+      delay: 2
+      until: http_check.status == 200
+      
+    - name: "[VALIDATION] Afficher le résultat de la vérification HTTP"
+      debug:
+        msg: "✓ Service HTTP accessible sur {{ app_url }} (Status: {{ http_check.status }})"
+    
+    # PARTIE 2: HYGIÈNE MINIMALE (READ-ONLY)
+    
+    - name: "[HYGIÈNE] Récupérer les informations du container"
+      command: docker inspect {{ container_name }}
+      register: container_inspect
+      changed_when: false
+      
+    - name: "[HYGIÈNE] Parser les informations du container"
+      set_fact:
+        container_info: "{{ container_inspect.stdout | from_json | first }}"
+    
+    - name: "[HYGIÈNE] Vérifier que le container est en état 'running'"
+      assert:
+        that:
+          - container_info.State.Status == "running"
+        fail_msg: "Le container n'est pas en état 'running' (état actuel: {{ container_info.State.Status }})"
+        success_msg: "Container en état 'running'"
+    
+    - name: "[HYGIÈNE] Vérifier que le container a démarré récemment"
+      assert:
+        that:
+          - container_info.State.Running == true
+        fail_msg: "Le container n'est pas actif"
+        success_msg: "Container actif et fonctionnel"
+    
+    - name: "[HYGIÈNE] Vérifier l'exposition du port attendu"
+      assert:
+        that:
+          - "external_port | string in container_info.NetworkSettings.Ports['80/tcp'][0].HostPort"
+        fail_msg: "Le port {{ external_port }} n'est pas exposé correctement"
+        success_msg: "Port {{ external_port }} correctement exposé"
+      when: container_info.NetworkSettings.Ports is defined
+    
+    - name: "[HYGIÈNE] Vérifier la politique de redémarrage automatique"
+      assert:
+        that:
+          - container_info.HostConfig.RestartPolicy.Name == expected_restart_policy
+        fail_msg: "Politique de redémarrage incorrecte (attendu: {{ expected_restart_policy }}, actuel: {{ container_info.HostConfig.RestartPolicy.Name }})"
+        success_msg: "Politique de redémarrage correcte: {{ expected_restart_policy }}"
+    
+    - name: "[HYGIÈNE] Vérifier que le container est géré par Terraform"
+      assert:
+        that:
+          - "'managed_by' in container_info.Config.Labels"
+          - container_info.Config.Labels.managed_by == "terraform"
+        fail_msg: "Container non géré par Terraform"
+        success_msg: "Container correctement labellisé (managed_by=terraform)"
+      when: container_info.Config.Labels is defined
+    
+    # PARTIE 3: RAPPORT FINAL
+
+    - name: "[RAPPORT] Afficher le résumé de validation"
+      debug:
+        msg:
+          - "           RAPPORT DE VALIDATION ANSIBLE           "
+          - "═══════════════════════════════════════════════════"
+          - "Container      : {{ container_name }}"
+          - "ID             : {{ container_info.Id[:12] }}"
+          - "État           : {{ container_info.State.Status }}"
+          - "Image          : {{ container_info.Config.Image }}"
+          - "Port exposé    : {{ external_port }} → 80"
+          - "Restart Policy : {{ container_info.HostConfig.RestartPolicy.Name }}"
+          - "URL            : {{ app_url }}"
+          - "HTTP Status    : {{ http_check.status }}"
+          - "═══════════════════════════════════════════════════"
+          - "Toutes les vérifications sont passées avec succès"
